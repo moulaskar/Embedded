@@ -1,0 +1,394 @@
+diff -uNr kernel.old/arch/x86/syscalls/syscall_32.tbl kernel.new/arch/x86/syscalls/syscall_32.tbl
+--- kernel.old/arch/x86/syscalls/syscall_32.tbl	2017-06-17 10:44:31.000000000 -0700
++++ kernel.new/arch/x86/syscalls/syscall_32.tbl	2020-04-29 20:15:39.294802000 -0700
+@@ -365,3 +365,5 @@
+ 356	i386	memfd_create		sys_memfd_create
+ 357	i386	bpf			sys_bpf
+ 358	i386	execveat		sys_execveat			stub32_execveat
++359     i386    insdump                 sys_insdump
++360     i386    rmdump                  sys_rmdump
+diff -uNr kernel.old/include/linux/syscalls.h kernel.new/include/linux/syscalls.h
+--- kernel.old/include/linux/syscalls.h	2017-06-17 10:44:57.000000000 -0700
++++ kernel.new/include/linux/syscalls.h	2020-05-05 12:51:14.931325059 -0700
+@@ -882,4 +882,6 @@
+ 			const char __user *const __user *argv,
+ 			const char __user *const __user *envp, int flags);
+ 
++asmlinkage long sys_insdump(const char __user *symbolname, dumpmode_t __user mode);
++asmlinkage long sys_rmdump(unsigned int dumpid);
+ #endif
+diff -uNr kernel.old/include/linux/types.h kernel.new/include/linux/types.h
+--- kernel.old/include/linux/types.h	2017-06-17 10:44:57.000000000 -0700
++++ kernel.new/include/linux/types.h	2020-04-29 20:25:31.942544000 -0700
+@@ -173,6 +173,9 @@
+  */
+ typedef unsigned long irq_hw_number_t;
+ 
++/* typedef for dynamic_dump_stack */
++typedef unsigned int dumpmode_t;
++
+ typedef struct {
+ 	int counter;
+ } atomic_t;
+diff -uNr kernel.old/lib/dynamic_dump_stack.c kernel.new/lib/dynamic_dump_stack.c
+--- kernel.old/lib/dynamic_dump_stack.c	1969-12-31 17:00:00.000000000 -0700
++++ kernel.new/lib/dynamic_dump_stack.c	2020-05-05 12:52:21.697523735 -0700
+@@ -0,0 +1,325 @@
++/* -------------------------------------------------------------------------------------------------
++ 
++					insdump and rmdump system call	
++- Exposes System call interface to insert(insdump) and remove dump(rmdump)
++- insdump = 359 and rmdump = 360 at syscall_32.tbl
++- Configured from menuconfig via CONFIG_DYNAMIC_DUMP_STACK
++- insdump 
++   - SYSCALL_DEFINE2(insdump, const char __user *,symbolname, dumpmode_t __user *,mode)
++   - provides interface to register kprobes for valid symbols from /proc/kallsyms and static symbols from text segment mapped to System.map
++   - returns unique positive non zero identifier to userspace on success or negative number if error
++   - provides "MAX_PROBE_PER_PID" symbols per pid. Currently set to 10
++   - only unique sysmbols are registered with kprobe per pid
++   - dump_stack() is called from kprobe prehandler and which process can use dump is controlled by mode
++   - mode = 0, only process which registered kprobe can use dump
++   - mode = 1, process whoregistered and all his siblings
++   - mode > 1, any process and access the dump_stack
++- rmdump
++   - SYSCALL_DEFINE1(rmdump, unsigned int, dumpid)
++   - provides user intreface to remove dump trace for particular symbol via unique dumpid 
++   - dumpid 0 is reserved to remove all the dump_stack traces for particular pid
++   - dumpid o is useful when process is exiting or throughfully wants to remove all the traces
++ 
++ ----------------------------------------------------------------------------------------------------------------*/
++
++#include<linux/kernel.h>
++#include <linux/slab.h>
++#include<linux/init.h>
++#include<linux/sched.h>
++#include<linux/syscalls.h>
++#include<linux/string.h>
++#include<linux/kprobes.h>
++#include<linux/kallsyms.h>
++#include<linux/module.h>
++#include <linux/types.h>
++#include <linux/slab.h>
++#include <linux/mutex.h>
++#define MAX_SYMBOL_LENGTH 32
++#define MAX_PROBE_PER_PID 10
++
++/*struct for each symbol*/
++struct symbol {
++    unsigned int dumpeid;
++    dumpmode_t mode;
++    char name[MAX_SYMBOL_LENGTH];
++    int isValid;
++    struct kprobe kp;
++    struct dynamic_dump_stack *dstackptr;
++};
++
++/* struct for each symbol */
++struct dynamic_dump_stack {
++    pid_t pid;
++    pid_t groupId;
++    struct symbol symb[MAX_PROBE_PER_PID];
++    struct list_head dumpStackNode;
++}; 
++   
++//static struct dynamic_dump_stack *dump;
++static unsigned int dumpIdentifier = 1; 
++static DEFINE_MUTEX(guard);
++
++static struct list_head dumpList = LIST_HEAD_INIT(dumpList);
++
++/*
++* struct dynamic_dump_stack *lookup_pid(int pid)
++* search for existing PID in the list dump_stack_list
++* on success, return the existing node
++* else returns NULL
++*/
++
++struct dynamic_dump_stack *lookup_pid(int pid)
++{
++    //int ret = 0;
++    struct list_head *pos = NULL;
++    struct dynamic_dump_stack *dstack = NULL;
++    if(list_empty(&dumpList))
++    {
++        pr_debug("List is empty \n");
++        return NULL;
++    }
++    list_for_each(pos, &dumpList)
++    {
++        dstack = list_entry(pos, struct dynamic_dump_stack, dumpStackNode); 
++        if(dstack->pid == pid)
++        {
++            pr_debug("found entry for pid %d\n",pid);
++            return dstack; 
++            
++        }
++      
++    } 
++    return NULL;
++}
++
++/*
++* int delete_node(int pid)
++* unregisters all kprobe associated with pid and remove the node from headlist
++* On success, returns 0
++*/
++
++int delete_node(int pid)
++{
++    int i=0; 
++    struct dynamic_dump_stack *dstack = NULL;
++    struct list_head *pos = NULL;
++    dstack = lookup_pid(pid);
++
++    pr_debug("Remove nodes\n"); 
++
++    if(dstack == NULL)
++    {
++        printk("pid does not exist line=%d\n",__LINE__);
++        return -EINVAL;
++    }
++    mutex_lock(&guard); 
++    for(i = 0; i < MAX_PROBE_PER_PID; i++)  // check if symbol name already exists
++    {
++        if(dstack->symb[i].isValid == 1) 
++        {
++            dstack->symb[i].isValid = 0;
++            dstack->symb[i].dumpeid = 0;
++            dstack->symb[i].dstackptr = NULL;
++            unregister_kprobe(&dstack->symb[i].kp);
++        }
++    }
++    list_del(&dstack->dumpStackNode); 
++    kfree(dstack);
++    list_for_each(pos, &dumpList)
++    {
++        dstack = list_entry(pos, struct dynamic_dump_stack, dumpStackNode); 
++    }
++    mutex_unlock(&guard); 
++    return 0;
++}
++
++/*
++* SYSCALL_DEFINE1(rmdump, unsigned int, dumpid)
++* interface to remove dump_stack strace for particular identifier
++* returns 0 on success or -EINVAL on failure
++*/
++
++SYSCALL_DEFINE1(rmdump, unsigned int, dumpid)
++{
++
++#ifdef CONFIG_DYNAMIC_DUMP_STACK
++    pid_t pid;
++    int i;
++    struct task_struct* task = current;
++    struct dynamic_dump_stack *dstack = NULL;
++    pid = task->pid;
++    //printk("removing dumpid = %d for pid = %d\n",dumpid, pid);
++    // If dumpid == 0 => the process is exiting so remove all the probe with existing pid and delete node 
++    if(dumpid == 0)
++    {
++        
++        return delete_node(pid);
++    }      
++    //otherwise unregister single probe
++    dstack = lookup_pid(pid); 
++    if(dstack == NULL)
++    {
++       printk("dumpid %d is not associated with pid %d\n",dumpid,pid);
++       return -EINVAL;
++    }
++    for(i = 0; i < MAX_PROBE_PER_PID; i++)  // check if symbol name already exists
++    {
++        //printk("Iteration %d\n",i);
++        if(dstack->symb[i].dumpeid == dumpid)
++        {
++            if(dstack->symb[i].isValid == 1) 
++            {
++                dstack->symb[i].isValid = 0;
++                dstack->symb[i].dumpeid = 0;
++                dstack->symb[i].dstackptr = NULL;
++                //printk("Removing probe in func: %s in line: %d\n",__func__,__LINE__);
++                unregister_kprobe(&dstack->symb[i].kp);
++                return 0;
++            }
++                 
++        }
++    }
++    return -EINVAL;
++#else
++    return 0;
++#endif
++}
++
++/*
++* int dumpstack_handler_pre(struct kprobe *p, struct pt_regs *regs)
++* kprobe prehandler for dump_stack
++*/
++
++int dumpstack_handler_pre(struct kprobe *p, struct pt_regs *regs)
++{
++
++    struct dynamic_dump_stack *dstack = NULL;
++    struct symbol *sym = NULL;
++    struct task_struct *task = current;
++    pid_t tgid = task->tgid;
++    pid_t pid = task->pid;
++    
++    sym = container_of(p, struct symbol, kp);
++    
++    dstack = sym->dstackptr;
++    if(dstack == NULL)
++    {
++       printk("Dstack not initialized yet for symb=%s\n",sym->name);
++       return 0;
++ 
++    }
++
++    if(sym->mode == 0 && pid == dstack->pid)
++    {   
++         pr_debug("Inside handler MODE 0  symname = %s, pid=%d dstack->pid=%d dstack->tgid = %d sym->mode=%d\n",sym->name,pid, dstack->pid, dstack->groupId, sym->mode); 
++   	 dump_stack();
++    }
++    else if(sym->mode == 1 && (pid == dstack->pid || tgid == dstack->groupId))
++    {            
++         pr_debug("Inside handler MODE 1 symname = %s, pid=%d dstack->pid=%d dstack->tgid = %d sym->mode=%d\n",sym->name,pid, dstack->pid, dstack->groupId, sym->mode); 
++   	 dump_stack();
++    }
++    else if(sym->mode > 1)
++    {
++         pr_debug("Inside handler MODE > 1 symname = %s, pid=%d dstack->pid=%d dstack->tgid = %d sym->mode=%d\n",sym->name,pid, dstack->pid, dstack->groupId, sym->mode); 
++   	 dump_stack();
++    }
++    return 0;
++}
++
++/*
++* SYSCALL_DEFINE2(insdump, const char __user *,symbolname, dumpmode_t __user *,mode)
++* interface to register kprobe for a symbol for dump_stack trace 
++* returns non zero, positive identifier on success or -EINVAL on failure
++*/
++
++SYSCALL_DEFINE2(insdump, const char __user *,symbolname, dumpmode_t __user ,mode)
++{
++
++#ifdef CONFIG_DYNAMIC_DUMP_STACK
++    pid_t pid;
++    pid_t tgid;
++    struct task_struct* task = current;
++    struct dynamic_dump_stack *dstack = NULL;
++    int index = 0;
++    int flag = 0;
++    int i = 0;
++    //printk("inside define2\n");
++    pid = task->pid;
++    tgid = task->tgid; 
++    /*if symbol nameis null, return*/
++    if(symbolname == NULL)
++    {
++        printk("Symbol name is null: not valid\n");
++        return -EINVAL;
++    }
++    if (kallsyms_lookup_name(symbolname) == 0 || !(kallsyms_lookup_name(symbolname) >= (unsigned long)_stext && kallsyms_lookup_name(symbolname) <= (unsigned long)_end))    /* check to see if symbolname exists in /proc/kallsyms*/
++    {
++        printk("Symbol not found in kallsyms for %s and pid = %d",symbolname,pid);
++        return -EINVAL;
++    }
++    
++    dstack = lookup_pid(pid); 
++    mutex_lock(&guard); 
++    if(dstack == NULL)    // there is no valid pid existing, create node
++    {
++        dstack = (struct dynamic_dump_stack*)kmalloc(sizeof(struct dynamic_dump_stack), GFP_KERNEL);
++        if(dstack == NULL)
++        {
++           printk("couldnt allocate memory for %d\n",pid);
++           mutex_unlock(&guard); 
++           return -ENOMEM;
++        }
++        memset(dstack, 0, sizeof(struct dynamic_dump_stack));
++        dstack->pid = task->pid;
++        dstack->groupId = task->tgid;
++        list_add(&dstack->dumpStackNode, &dumpList);
++    }
++    if(dumpIdentifier == UINT_MAX-1)
++       dumpIdentifier = 1; 
++
++    /*get the index if symbol dosent exist, if it does return -EINVAL*/
++    for(i = 0; i < MAX_PROBE_PER_PID; i++)  
++    {
++        if((dstack->symb[i].isValid == 0) && (flag == 0))
++        {
++            index = i; 
++            flag = 1;
++        }
++        if((strcmp(dstack->symb[i].name, symbolname) == 0) && (dstack->symb[i].isValid == 1))
++        {
++            printk("Symbol %s already exist for this pid %d\n",symbolname,pid);
++            mutex_unlock(&guard); 
++            return -EINVAL;    
++        }
++    }
++    /* register kprobe and fill up the DS*/
++    if((i >= MAX_PROBE_PER_PID) && (flag == 0))
++    {
++        mutex_unlock(&guard); 
++        return -1;
++    }
++    dstack->symb[index].dumpeid = dumpIdentifier++;
++    dstack->symb[index].isValid = 1;
++    dstack->symb[index].mode = mode;
++    dstack->symb[index].dstackptr = dstack;
++    strcpy(dstack->symb[index].name, symbolname);
++    memset(&dstack->symb[index].kp, 0, sizeof(struct kprobe));
++    dstack->symb[index].kp.pre_handler = dumpstack_handler_pre;
++    dstack->symb[index].kp.addr = (kprobe_opcode_t *)(void **)kallsyms_lookup_name(symbolname);
++    if (register_kprobe(&dstack->symb[index].kp) < 0)
++    {
++         printk("register_kprobe error for rbt_driver_read\n");
++         dstack->symb[index].isValid = 0;
++         mutex_unlock(&guard); 
++         return -EINVAL;
++    }
++    mutex_unlock(&guard); 
++
++    pr_debug("Inside insdump: index = %d pid = %d gId = %d, mode = %d, id = %d symbName = %s\n",index, dstack->pid,dstack->groupId,dstack->symb[index].mode,dstack->symb[index].dumpeid, dstack->symb[index].name);        
++    return dstack->symb[index].dumpeid;
++#else
++    return 0;
++#endif
++
++}
+diff -uNr kernel.old/lib/Kconfig.debug kernel.new/lib/Kconfig.debug
+--- kernel.old/lib/Kconfig.debug	2017-06-17 10:44:58.000000000 -0700
++++ kernel.new/lib/Kconfig.debug	2020-04-29 20:27:12.057164000 -0700
+@@ -1715,6 +1715,17 @@
+ 
+ 	  If unsure, say N.
+ 
++config DYNAMIC_DUMP_STACK
++	bool "DYNAMIC DUMP STACK"
++	default n
++	help
++           CONFIG_DYNAMIC_DUMP_STACK enables dump_stack for a systemcall using kprobe.
++           Two systemcalls with number 359(insdump) and 360(rmdump) are provided to achieve
++           For use and details of implementation, please have a look into file 
++           kernel/lib/dynamic_dump_stack.c
++
++	   If unsure, say N.
++
+ source "samples/Kconfig"
+ 
+ source "lib/Kconfig.kgdb"
+diff -uNr kernel.old/lib/Makefile kernel.new/lib/Makefile
+--- kernel.old/lib/Makefile	2017-06-17 10:44:58.000000000 -0700
++++ kernel.new/lib/Makefile	2020-04-29 20:28:00.512580000 -0700
+@@ -26,7 +26,7 @@
+ 	 bust_spinlocks.o hexdump.o kasprintf.o bitmap.o scatterlist.o \
+ 	 gcd.o lcm.o list_sort.o uuid.o flex_array.o iovec.o clz_ctz.o \
+ 	 bsearch.o find_last_bit.o find_next_bit.o llist.o memweight.o kfifo.o \
+-	 percpu-refcount.o percpu_ida.o rhashtable.o reciprocal_div.o
++	 percpu-refcount.o percpu_ida.o rhashtable.o reciprocal_div.o dynamic_dump_stack.o
+ obj-y += string_helpers.o
+ obj-$(CONFIG_TEST_STRING_HELPERS) += test-string_helpers.o
+ obj-y += kstrtox.o
