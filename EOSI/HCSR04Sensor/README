@@ -1,0 +1,79 @@
+Device Driver for HC-SR04 an ultrasonic distance sensor
+
+Hardware: Intel Galileo Gen2 , HC-SR04 sensor
+
+Software: gcc: i586 poky linux
+
+Linux Version: 3.19.18
+
+Objective: Develop a kernel module to measure the distance using distance measuring sensor HC-SR04
+
+HC-SR04
+HC-SR04 is an ultrasonic ranging module that provides 2 cm to 400 cm non-contact measurement function.
+The ranging accuracy can reach to 3mm and effectual angle is < 15°. It can be powered from a 5V power supply.
+The modules includes ultrasonic transmitters, receiver and control circuit. 
+The basic principle of work: 
+    (1) Using IO trigger for at least 10us high level signal
+    (2) The Module automatically sends eight 40 kHz and detect whether there is a pulse signal back. 
+    (3) IF the signal back, through high level , time of high output IO duration is the time from sending ultrasonic to returning. 
+Test distance = (high level time×velocity of sound (340M/S) / 2
+Recommended distance between two Trigger Input to Module is 60ms
+
+FOLDER:
+
+    Part1:  Standard ioctl, read, write to HC-SR04 module 
+            ReadMe_Part1 has details of content of folder and compilation, installation and execution precedure.
+
+    Part2:  Platform device and driver infrastructure for HC-SR04
+            ReadMe_Part2 has details of content of folder and compilation, installation and execution precedure.
+
+MiscDevice - Misc (or miscellaneous) drivers are simple char drivers that share certain common characteristics.the Linux kernel exports an interface to allow modules to 
+register their own small drivers. 
+
+Part 1:
+User can create any number of misc devices which is user configurable (currently supports 10)
+insmod hcsr.ko max_device=2
+
+INPUTS: 
+Inputs from user is set in main.c with the below preprocessor directives( currently only two mentioned in file)
+
+Shield Pin for Trigger   : TRIGG_PIN_1, TRIGG_PIN_2
+Sheild Pin for Echo      : ECHO_PIN_1, ECHO_PIN_2
+Number of Measurement    : M_1 , M_2
+Time between two trigger : DELTA_1, DELTA_2
+
+OUTPUT:
+Average distance in cm
+
+CODE STRUCTURE:
+Part1:
+ FILE: hcsr.c
+ - Implements a standard misc driver exposing device nodes for userspace application to run read, write, ioctl.
+ - ioctl is used to setup echo, trigger, measurement period and frequency for HCSR range sensor. The ioctl also setup automatically mux, direction, level shifter etc.
+ - write system call will trigger a new measurement if there is no-ongoing measurement. If i/p integer is 1, it clears the buffer if no measurement is being taken at that instance.
+ - the read system call will block till a measurement is availabe or else return a completed measurments. The measurments are average of several samples, depending on input m, taken by the senor. 
+ - Module as takes arguments max_devices to create user configured devices mapping to different HCSR sensors if present. 
+ - A worker thread, measurement_thread_function, is created to send a trigger signal to the sensor. Correspondingly, measurement is taken from the time between the rising and falling edge of the echo    pin which is an interrupt handled by the function irq_handler.
+ - Function calculate_distance calculates the average.
+ main.c
+ - Implements the userspace application which has predefied sets of pins configured to test the kernel module.
+    
+
+Part2:
+Part2 works independently of Part1 and can calculate measurement through sys filesystem and through standard interface independently. 
+ FILE: 
+hcsr_plat_driver.c
+ - Extends the driver from Part1 to be a platform driver. Here the module registers with platfrom bus for devices represented by the driver. Registers a probe function with platform_driver_register().
+ - It also extend the userspace interface by creating sysfs under /sys/class/HCSR/*. Each sysfs device class provides sysfs interface of echo, trigger, number_samples, sampling_period, enable, distace   to perform echo pin configuration, tirgger pin configuration, number of samples, time, eanble/disable measurement and distance respectively
+
+hcsr_plat_device.c
+ - Implements the platform device, which registers the device with platform bus thereby triggering the invocation of probe function of platform driver for HCSR_n.
+ - The module also take max_devices (10 Max) as moudule parameter which indecates the number of devices it supports and registers with the platform bus by calling platform_device_register()
+
+bash_tester.sh
+ - Shell script which uses the sysfs interface to get distance from HCSR sensors. It performs the same task as main.c from Part1 while using the sysfs instead of device node and systemcall.
+
+
+    
+
+

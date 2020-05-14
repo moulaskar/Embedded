@@ -1,0 +1,21 @@
+CONTENT OF PART1
+
+HCSR-04 driver module - hcsr.c
+MAIN                  - main.c
+IOCTL Headers         - hcsr_ioctl.h
+Makefile
+build.sh              - makes clean build and transfer files to /tftpboot
+install_gen2_part1.sh - Run the script in gen2 board to install the module
+
+STEPS TO BUILD AND INSTALL
+
+1. run ./build.sh
+     - builds kernel module along with hcsr.ko and hcsr_test
+     - copies hcsr.ko and hcsr_test to /tftpboot
+
+2. run ./install_gen2_part1.sh on Board 
+     - rmmod hcsr.ko if present
+     - copies hcsr.ko and hcsr_test via tftp
+     - insmod hcsr.ko with configurable number of device "max_device"
+
+3. run ./hcsr_test

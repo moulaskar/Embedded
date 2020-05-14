@@ -1,0 +1,29 @@
+CONTENT OF PART2
+
+FILES
+HCSR-04 platform driver module - hcsr_platdriver.c
+HCSR-04 platform device module - hcsr_platdevice.c
+MAIN                           - main.c
+IOCTL Header                   - hcsr_ioctl.h
+PLATFORM DRIVER Header         - hcsr_platdriver.h 
+MAKEFILE
+
+SCRIPTS
+build.sh              - makes clean build and transfer files to /tftpboot
+bashtester.sh         - sysfs interface
+install_gen2_part1.sh - Run the script in gen2 board to install the module
+
+STEPS TO BUILD AND INSTALL
+
+1. run ./build.sh
+     - compiles and builds kernel module
+     - copies bashtester.sh, hcsr_platdevice.ko, hcsr_platdriver.ko and hcsr_test to /tftpboot
+
+2. run ./install_gen2_part2.sh on Board 
+     - rmmod modules if present
+     - copies files via tftp
+     - insmod platform driver and device modules
+
+3. run
+    - For sys filesystem interface, execute ./bashtester.sh
+    - For standard systemcall interface,  execute ./hcsr_test
