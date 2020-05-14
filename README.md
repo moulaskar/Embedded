@@ -1,7 +1,7 @@
 # Embedded
-This repository will contain all the embedded and IOTG projects i have done.
+This repository will contain all the embedded and IOTG projects
 Includes
-  - College assignmnets
+  - College Projects and assignmnets
   - Personal Projects
 College Assignments
   - CSE 520 Conputer Architecture II (gen5) - ASU
