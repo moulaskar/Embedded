@@ -1,0 +1,43 @@
+Generic Netlink Socket and SPI Programming
+
+Purpose: User Netlink interface to change display based on distance measurement
+
+Hardware: Intel Galileo Gen2 , HC-SR04 sensor, MAX7219 (LED DOT MATRIX)
+
+Software: gcc: i586 poky linux
+
+Linux Version: 3.19.18
+
+This assignment consists of two parts
+
+a) user space: gen_ex.c where HCSR pin and LED ping configuration are sent to driver over netlink socket. The netlink interface is also used to received async netlink events from kernel. The event received is the distance measured by HCSR range sensor. Based on the distance the application decides to send to different animation where the speed of a bouncing ball increases or decreases based on the the distance greater than 75 or not.
+
+Restrictions on gpio
+   Trigger Pin values = Shield Pins 0,1,2,3,4,5,6,7,8,9,10,12
+   Echo Pins  values  = Shield Pins 0,1,2,3,4,5,6,9,10,12
+   Led CS values       = Shield Pins 0,1,2,3,4,5,6,9,10,12
+
+Led MOSI and CLK pins are hardcoded for Shield Pin 11 and 13 respectively.
+This program currently support 1 HCSR and 1 MAX7219
+
+The program is ended by pressing Ctrl C on key board where from a signal handler is called to free the gpios and switch off the display. 
+
+b) kernel space driver is a reuse of hcsr.c from previous assignment where the sysfs and ioctl interface are removed and support for netlink interface is provided. All configurations are received via netlink socket and measured distance is asynchronously reported back to userspace application on multi cast group genl_mcgrp0.
+ 
+CONTENT OF PART1
+HCSR-04  and LED driver module - kernel/hcsr.c
+Userspace application to test the driver                  - genl_ex.c
+Header file containing info about netlink setting        - genl_ex.h
+Makefile       - for userspace make 
+kernel/Makefile – for dirver make
+build.sh              - makes clean build and transfer files to /tftpboot
+install.sh - Run the script in gen2 board to install the module
+
+STEPS TO BUILD AND INSTALL
+1. make (in the EOSI folder) 
+     - builds kernel module (kernel/hcsr.ko) and userspace application genl_app 
+
+2. run on Board 
+     - rmmod hcsr.ko if present
+     - download  hcsr.ko and genl_app via tftp
+     - insmod hcsr.ko 
