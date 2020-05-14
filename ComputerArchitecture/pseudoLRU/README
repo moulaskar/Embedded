@@ -1,0 +1,15 @@
+Declaration of a replacement policy based on paper
+"Insersion and Promotion for Tree-Based PseudoLRU Last-Level Caches  by Daniel A. Jimenez
+- Please Note that implementation here is not tree based but have used the IPVector generated from 
+genertic algorithm provided in the paper.
+- This code is implementation of Figure 3 of paper.
+- Gist of Implementation:
+  - Each blacks in a set is associated with a index, from 0 to (num_way-1)
+  - A vector is created which is shared between all the blocks within the set
+  - Job of this vector is to store the information about the status of each 
+    block within the set. The status changes based on const IPV vector.
+  - Each set will have its own such vectors. 
+  - This vector's index is mapped to block's index. For example
+  - if block's index is 0, it represents the index 0 of the vect.
+  - All manupulation is done on the vect which actually represents the blocks within the sets
+ 
